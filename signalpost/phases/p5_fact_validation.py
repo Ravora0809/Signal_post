@@ -1,0 +1,76 @@
+import re
+from datetime import datetime
+from sqlalchemy.orm import Session
+from ..models import Fact, Source
+
+KEY_RULES = {
+    "employees": {"type": "int", "min": 0, "max": 2_000_000},
+    "revenue_nok": {"type": "int", "min": 0, "max": 5_000_000_000_000},
+    "profit_nok": {"type": "int", "min": -5_000_000_000_000, "max": 5_000_000_000_000},
+    "founded_year": {"type": "int", "min": 1800, "max": datetime.now().year},
+    "phone": {"type": "phone"}, "email": {"type": "email"}, "website": {"type": "url"},
+    "postal_code": {"type": "postal"},
+}
+EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
+URL_RE = re.compile(r"^https?://", re.I)
+
+
+def validate_one(fact: Fact) -> bool:
+    rule = KEY_RULES.get(fact.key)
+    if not rule:
+        return bool(fact.value_text)
+    t = rule["type"]
+    if t == "int":
+        try:
+            v = fact.value_int if fact.value_int is not None else int(str(fact.value_text).replace(",", ""))
+        except Exception:
+            return False
+        if not rule["min"] <= v <= rule["max"]:
+            return False
+        fact.value_int, fact.value_text = v, str(v)
+    elif t == "email":
+        if not fact.value_text or not EMAIL_RE.match(fact.value_text.strip()): return False
+    elif t == "url":
+        if not fact.value_text or not URL_RE.match(fact.value_text.strip()): return False
+    elif t == "phone":
+        digits = re.sub(r"\D", "", fact.value_text or "")
+        if not 8 <= len(digits) <= 15: return False
+    elif t == "postal":
+        if not re.match(r"^\d{4}$", fact.value_text or ""): return False
+    # Evidence/source trust is enforced by validate_and_publish, not by the
+    # pure value/type validator. This keeps validate_one independently testable.
+    return True
+
+
+def _value(f: Fact) -> str:
+    if f.value_int is not None: return str(f.value_int)
+    if f.value_num is not None: return str(f.value_num)
+    return (f.value_text or "").strip().casefold()
+
+
+def validate_and_publish(session: Session, company_id: int, facts: list[Fact]) -> None:
+    by_key: dict[str, list[Fact]] = {}
+    for f in facts:
+        f.verified = False
+        f.conflict = False
+        if not validate_one(f):
+            continue
+        if not f.evidence_snippet or not f.source_id:
+            continue
+        src = session.query(Source).filter(Source.id == f.source_id, Source.company_id == company_id).one_or_none()
+        if not src or not src.identity_verified:
+            continue
+        by_key.setdefault(f.key, []).append(f)
+
+    for key, group in by_key.items():
+        values = {_value(f) for f in group}
+        if len(values) > 1:
+            # Do not publish unresolved conflicts.
+            for f in group: f.conflict = True
+            continue
+        winner = max(group, key=lambda f: (f.confidence, f.observed_at, f.id or 0))
+        winner.verified = True
+        for f in group:
+            if f is not winner:
+                f.verified = False
+    session.flush()
