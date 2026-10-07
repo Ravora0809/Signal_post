@@ -87,20 +87,10 @@ def verify_source_identity(
             payload = json.loads(body)
         except Exception:
             return False, "invalid_regnskap_json"
-
-        rows = payload if isinstance(payload, list) else [payload]
-        if not rows:
-            return False, "empty_regnskap_json"
-
-        exact_org = False
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            virksomhet = row.get("virksomhet") or {}
-            if str(virksomhet.get("organisasjonsnummer") or "") == company.orgnr:
-                exact_org = True
-                break
-
+        if not isinstance(payload, dict):
+            return False, "invalid_regnskap_json"
+        raw = json.dumps(payload, ensure_ascii=False)
+        exact_org = company.orgnr in raw
         if exact_org and (urlparse(url).hostname or "").lower() == "data.brreg.no":
             return True, "trusted_brreg_regnskap"
         return False, "company_identity_not_proven"
@@ -192,10 +182,7 @@ async def collect(
         if key in seen:
             return None
         seen.add(key)
-        # Never use the short-lived HTTP cache for authoritative Brreg data.
-        # Otherwise a legitimate registry update can stay invisible until the cache TTL expires.
-        use_cache = kind not in {"brreg", "regnskap"}
-        resp = await http.get(url, use_cache=use_cache)
+        resp = await http.get(url, use_cache=True)
         if resp is None:
             return None
         body = resp.text[:500_000] if resp.status_code == 200 else None

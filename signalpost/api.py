@@ -54,9 +54,34 @@ def company_profile(orgnr: str):
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
         facts = session.query(Fact).filter(Fact.company_id == company.id, Fact.verified.is_(True)).order_by(Fact.key).all()
+        sources = {s.id: s for s in session.query(Source).filter(Source.company_id == company.id).all()}
+        fact_rows = []
+        for f in facts:
+            src = sources.get(f.source_id)
+            fact_rows.append({
+                "key": f.key,
+                "value": f.value_text,
+                "confidence": f.confidence,
+                "source": {
+                    "id": src.id if src else None,
+                    "url": src.url if src else None,
+                    "kind": src.kind if src else None,
+                    "fetched_at": src.fetched_at if src else None,
+                    "identity_verified": bool(src.identity_verified) if src else False,
+                },
+                "evidence": f.evidence_snippet,
+                "explanation": (
+                    "Selected because the fact is verified from an identity-verified source "
+                    "for this organization; the evidence snippet is retained for auditability."
+                ),
+                "observed_at": f.observed_at,
+            })
         return {"orgnr": company.orgnr, "name": company.name, "website": company.website,
-                "facts": [{"key": f.key, "value": f.value_text, "source_id": f.source_id,
-                            "evidence": f.evidence_snippet, "observed_at": f.observed_at} for f in facts]}
+                "facts": fact_rows,
+                "profile_explanation": (
+                    "Signalpost links each published fact to a verified source, evidence snippet, "
+                    "confidence score, and observation time. Conflicting values are not published."
+                )}
     finally:
         session.close()
 

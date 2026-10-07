@@ -108,7 +108,7 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
 
     facts: list[dict] = []
 
-    def add(key: str, value, confidence: float = .99, json_key: str | None = None, as_of: str | None = None):
+    def add(key: str, value, confidence: float = .99, json_key: str | None = None):
         if value in (None, "", [], {}):
             return
         if isinstance(value, list):
@@ -118,18 +118,9 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
             "value": value,
             "confidence": confidence,
             "evidence": _snippet(body, json_key or key),
-            "as_of": as_of,
         })
 
-    employee_as_of = data.get(
-        "registreringsdatoAntallAnsatteEnhetsregisteret"
-    )
-    add(
-        "employees",
-        data.get("antallAnsatte"),
-        json_key='"antallAnsatte"',
-        as_of=employee_as_of,
-    )
+    add("employees", data.get("antallAnsatte"), json_key='"antallAnsatte"')
 
     industry = data.get("naeringskode1") or {}
     if isinstance(industry, dict):

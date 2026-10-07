@@ -56,3 +56,7 @@ build/
 *.key
 credentials.json
 service-account*.json
+
+# Large Brreg datasets
+data/brreg_companies.csv
+data/brreg_companies_decompressed.csv

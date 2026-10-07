@@ -19,94 +19,18 @@ Signalpost researches Norwegian companies from a 9-digit organization number and
 9. **Evaluation** — random sample evaluation with coverage, identity/evidence, update, explanation, and usability signals; target ≥65/100 and ≥21/35 coverage.
 10. **Production & Submission** — Docker, PostgreSQL, FastAPI, CLI, migrations, tests, one-command startup, model/API configuration, and cost reporting.
 
-## Configuration
+## Setup
 
-Copy `.env.example` to `.env`. The default setup uses your OpenRouter key and free DuckDuckGo discovery:
+### Requirements
 
-```env
-OPENROUTER_API_KEY=your_key
-LLM_PROVIDER=openrouter
-LLM_MODEL=openai/gpt-4o-mini
-SEARCH_PROVIDER=duckduckgo
-MAX_REQUESTS=2000
-MAX_RUNTIME_SECONDS=2700
-MAX_COST_USD=10
-HTTP_TIMEOUT=15
-HTTP_CONCURRENCY=12
-HTTP_CACHE_TTL_SECONDS=300
-```
+- Git
+- Docker Desktop
+- Docker Compose
+- Python 3.12+ for local development
+- OpenRouter API key
 
-## One command with Docker
+### 1. Clone the repository
 
 ```bash
-docker compose up --build
-```
-
-The API is available at `http://127.0.0.1:8000`. Docker runs Alembic migrations before starting FastAPI.
-
-## Local setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-alembic upgrade head
-uvicorn signalpost.api:app --reload
-```
-
-## API
-
-### Research
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/research \
-  -H 'Content-Type: application/json' \
-  -d '{"company_number":"923609016"}'
-```
-
-### Current profile
-
-`GET /companies/{orgnr}`
-
-### Sources
-
-`GET /companies/{orgnr}/sources`
-
-### Change history
-
-`GET /companies/{orgnr}/history`
-
-### Bulk
-
-`POST /bulk-research` with `{"company_numbers":[...]}`
-
-### Evaluation
-
-`POST /evaluate?sample_size=100`
-
-### Health
-
-`GET /health`
-
-## CLI
-
-```bash
-python -m signalpost.cli research 923609016
-python -m signalpost.cli bulk companies.csv --concurrency 4
-python -m signalpost.cli evaluate --n 100
-```
-
-## Safety and correctness
-
-DuckDuckGo is used only to discover candidate URLs. A search result is never trusted as a fact. Every fetched source passes SSRF protection and company-identity verification. Every published fact must have grounded evidence from a verified source. If conflicting values cannot be deterministically resolved, they are not published.
-
-## Submission checklist
-
-- [ ] ≥1,000 complete company profiles
-- [ ] Repository URL
-- [ ] Exact commit hash
-- [ ] One-command run
-- [ ] Model/API details
-- [ ] Expected run cost
-- [ ] Tests passing in the target environment
+git clone https://github.com/YOUR_USERNAME/signalpost.git
+cd signalpost

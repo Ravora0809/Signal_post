@@ -192,10 +192,7 @@ async def collect(
         if key in seen:
             return None
         seen.add(key)
-        # Never use the short-lived HTTP cache for authoritative Brreg data.
-        # Otherwise a legitimate registry update can stay invisible until the cache TTL expires.
-        use_cache = kind not in {"brreg", "regnskap"}
-        resp = await http.get(url, use_cache=use_cache)
+        resp = await http.get(url, use_cache=True)
         if resp is None:
             return None
         body = resp.text[:500_000] if resp.status_code == 200 else None

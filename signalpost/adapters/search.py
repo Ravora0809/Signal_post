@@ -6,14 +6,9 @@ log = structlog.get_logger()
 
 
 class SearchAdapter:
-    """Free public-web discovery using DuckDuckGo.
-
-    Search results are candidates only. Every URL is fetched and identity-checked
-    by Phase 3 before it can become trusted evidence.
-    """
+    """Public-web discovery. Search results are candidates until Phase 3 verifies identity."""
 
     def __init__(self, budget=None, http=None):
-        # Kept injectable for pipeline compatibility; search itself is discovery-only.
         self.budget = budget
         self.http = http
 
@@ -24,23 +19,37 @@ class SearchAdapter:
             log.warning("duckduckgo_missing")
             return []
 
-        query = f'"{company_name}" "{orgnr}" Norway'
+        queries = [
+            f'"{company_name}" "{orgnr}" Norway',
+            f'"{company_name}" "{orgnr}" annual report',
+            f'"{company_name}" "{orgnr}" ansatte',
+        ]
 
         def _search():
-            return list(DDGS().text(query, max_results=8) or [])
+            out = []
+            seen = set()
+            with DDGS() as client:
+                for query in queries:
+                    try:
+                        rows = list(client.text(query, max_results=6) or [])
+                    except Exception as exc:
+                        log.warning("duckduckgo_query_failed", query=query, error=str(exc))
+                        continue
+                    for item in rows:
+                        url = item.get("href") or item.get("url") if isinstance(item, dict) else None
+                        if not url:
+                            continue
+                        if urlparse(url).scheme not in {"http", "https"}:
+                            continue
+                        if url not in seen:
+                            seen.add(url)
+                            out.append(url)
+                        if len(out) >= 12:
+                            return out
+            return out
 
         try:
-            results = await asyncio.to_thread(_search)
+            return await asyncio.to_thread(_search)
         except Exception as exc:
             log.warning("duckduckgo_search_failed", error=str(exc))
             return []
-
-        urls, seen = [], set()
-        for item in results:
-            url = item.get("href") or item.get("url") if isinstance(item, dict) else None
-            if not url or urlparse(url).scheme not in {"http", "https"}:
-                continue
-            if url not in seen:
-                seen.add(url)
-                urls.append(url)
-        return urls

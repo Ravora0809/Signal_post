@@ -56,31 +56,10 @@ def score_company(session: Session, company: Company) -> CompanyScore:
     history = session.query(FactHistory).filter(FactHistory.company_id == company.id).all()
 
     by_key = {f.key: f for f in verified}
+    useful_fact_count = len(set(by_key) & set(USEFUL_WEIGHTS))
 
-    canonical_useful = {
-        "employees", "industry", "address", "city", "postal_code",
-        "legal_form", "phone", "email", "website", "founded_year",
-        "registration_date", "industry_code", "capital_nok",
-    }
-
-    useful_fact_count = len(set(by_key) & canonical_useful)
-    if "revenue" in by_key or "revenue_nok" in by_key:
-        useful_fact_count += 1
-    if "profit" in by_key or "profit_nok" in by_key:
-        useful_fact_count += 1
-
-    useful_points = sum(
-        USEFUL_WEIGHTS[k]
-        for k in by_key
-        if k in USEFUL_WEIGHTS
-        and k not in {"revenue_nok", "profit_nok"}
-    )
-
-    if "revenue" in by_key or "revenue_nok" in by_key:
-        useful_points += USEFUL_WEIGHTS["revenue_nok"]
-    if "profit" in by_key or "profit_nok" in by_key:
-        useful_points += USEFUL_WEIGHTS["profit_nok"]
-
+    # Useful-information score: reward breadth of grounded, verified fields.
+    useful_points = sum(USEFUL_WEIGHTS[k] for k in by_key if k in USEFUL_WEIGHTS)
     useful_points = min(35.0, useful_points)
 
     # Matching/evidence score: each published fact needs a source tied to the

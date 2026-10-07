@@ -155,57 +155,14 @@ def _rank(source: Source | None, fact: Fact) -> tuple:
     )
 
 
-def _source_priority(source: Source | None) -> int:
-    """Authority ranking. Higher priority wins before confidence/recency."""
-    if source is None:
-        return 0
-
-    kind = (source.kind or '').lower()
-    path = (source.url or '').split('?', 1)[0].rstrip('/')
-
-    if kind == 'regnskap':
-        return 1000
-
-    if kind == 'brreg':
-        if '/enhetsregisteret/api/enheter/' in path and not path.endswith('/roller'):
-            return 950
-        if path.endswith('/roller'):
-            return 940
-        return 930
-
-    if kind == 'website':
-        return 700
-
-    if kind == 'search':
-        return 500
-
-    return 100
-
-
-def _candidate_rank(source: Source | None, fact: Fact) -> tuple:
-    return (
-        _source_priority(source),
-        source.fetched_at if source and source.fetched_at else datetime.min,
-        fact.as_of if fact.as_of else datetime.min,
-        fact.observed_at if fact.observed_at else datetime.min,
-        fact.id or 0,
-        float(fact.confidence or 0.0),
-    )
-
-
 def validate_and_publish(session: Session, company_id: int, facts: list[Fact]) -> None:
-    """Validate this run and publish exactly one current fact per key.
-
-    Source authority is considered before confidence so an LLM/web observation
-    cannot overwrite a newer structured Brreg fact. Older verified rows stay in
-    the database for history but are retired from the current published state.
-    """
-    source_cache: dict[int, Source | None] = {}
     by_key: dict[str, list[Fact]] = {}
+    source_cache: dict[int, Source | None] = {}
 
-    def source_for(fact: Fact) -> Source | None:
+    def get_source(fact: Fact) -> Source | None:
         if not fact.source_id:
             return None
+
         if fact.source_id not in source_cache:
             source_cache[fact.source_id] = (
                 session.query(Source)
@@ -215,51 +172,51 @@ def validate_and_publish(session: Session, company_id: int, facts: list[Fact]) -
                 )
                 .one_or_none()
             )
+
         return source_cache[fact.source_id]
 
-    # Only this run's facts enter candidate selection.
+    # Validate all fresh observations.
     for fact in facts:
         fact.verified = False
         fact.conflict = False
 
         if not validate_one(fact):
             continue
+
         if not fact.source_id or not fact.evidence_snippet:
             continue
 
-        source = source_for(fact)
+        source = get_source(fact)
         if not source or not source.identity_verified:
             continue
 
         by_key.setdefault(fact.key, []).append(fact)
 
-    for key, candidates in by_key.items():
-        if not candidates:
-            continue
-
+    # Select exactly one safe current observation per key.
+    for key, group in by_key.items():
         ranked = sorted(
-            candidates,
-            key=lambda fact: _candidate_rank(source_for(fact), fact),
+            group,
+            key=lambda fact: _rank(get_source(fact), fact),
             reverse=True,
         )
 
-        best_priority = _source_priority(source_for(ranked[0]))
-        best_authority = [
-            fact for fact in ranked
-            if _source_priority(source_for(fact)) == best_priority
+        highest_priority = _source_priority(get_source(ranked[0]))
+
+        highest_authority = [
+            fact
+            for fact in ranked
+            if _source_priority(get_source(fact)) == highest_priority
         ]
 
-        # Fail closed when equally authoritative observations disagree.
-        if len({_value(fact) for fact in best_authority}) > 1:
-            for fact in candidates:
+        # Same-authority disagreement is unresolved, so publish nothing.
+        if len({_value(fact) for fact in highest_authority}) > 1:
+            for fact in group:
                 fact.conflict = True
             continue
 
         winner = ranked[0]
 
-        # Retire every previously verified row for this key, except if the
-        # candidate is lower authority than the strongest old fact. This protects
-        # Brreg data from website/search overwrites.
+        # Load all previously published versions of this key.
         old_verified = (
             session.query(Fact)
             .filter(
@@ -274,24 +231,28 @@ def validate_and_publish(session: Session, company_id: int, facts: list[Fact]) -
         if old_verified:
             strongest_old = max(
                 old_verified,
-                key=lambda fact: _candidate_rank(source_for(fact), fact),
+                key=lambda fact: _rank(get_source(fact), fact),
             )
-            if _candidate_rank(source_for(winner), winner) < _candidate_rank(
-                source_for(strongest_old), strongest_old
+
+            # Lower authority can never replace a stronger current fact.
+            if _rank(get_source(winner), winner) < _rank(
+                get_source(strongest_old),
+                strongest_old,
             ):
                 winner.verified = False
                 continue
 
-        # Critical freshness invariant: one current published fact per key.
         winner.verified = True
-        winner.conflict = False
 
+        # Freshness fix:
+        # old observations remain in the DB for audit/history, but only the
+        # selected winner is allowed to remain published.
         for old in old_verified:
             old.verified = False
             old.conflict = False
 
-        for other in candidates:
-            if other is not winner:
-                other.verified = False
+        for fact in group:
+            if fact is not winner:
+                fact.verified = False
 
     session.flush()

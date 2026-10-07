@@ -108,7 +108,7 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
 
     facts: list[dict] = []
 
-    def add(key: str, value, confidence: float = .99, json_key: str | None = None, as_of: str | None = None):
+    def add(key: str, value, confidence: float = .99, json_key: str | None = None):
         if value in (None, "", [], {}):
             return
         if isinstance(value, list):
@@ -118,18 +118,9 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
             "value": value,
             "confidence": confidence,
             "evidence": _snippet(body, json_key or key),
-            "as_of": as_of,
         })
 
-    employee_as_of = data.get(
-        "registreringsdatoAntallAnsatteEnhetsregisteret"
-    )
-    add(
-        "employees",
-        data.get("antallAnsatte"),
-        json_key='"antallAnsatte"',
-        as_of=employee_as_of,
-    )
+    add("employees", data.get("antallAnsatte"), json_key='"antallAnsatte"')
 
     industry = data.get("naeringskode1") or {}
     if isinstance(industry, dict):
@@ -281,7 +272,7 @@ def structured_regnskap_extract(body: str, source: Source) -> list[dict]:
         ("annual_result", result.get("aarsresultat"), '"aarsresultat"'),
         ("total_assets", assets.get("sumEiendeler"), '"sumEiendeler"'),
         ("equity", equity.get("sumEgenkapital"), '"sumEgenkapital"'),
-        ("total_liabilities", debt.get("sumGjeld"), '"sumGjeld"'),
+        ("debt", debt.get("sumGjeld"), '"sumGjeld"'),
     ]
 
     for key, raw_value, evidence_key in values:
@@ -338,13 +329,6 @@ async def extract_from_source(llm: LLMAdapter, source: Source) -> tuple[list[dic
     cost = 0.0
     if should_llm:
         llm_facts, cost = await llm.extract_facts(source.body, ALLOWED_KEYS)
-        if source.kind == "brreg" and urlparse(source.url).path.rstrip("/").endswith("/roller"):
-            protected = {
-                "employees", "industry", "industry_code", "address",
-                "city", "postal_code", "legal_form", "phone",
-                "email", "website", "registration_date", "founded_year",
-            }
-            llm_facts = [f for f in llm_facts if f.get("key") not in protected]
         body_low = " ".join(source.body.lower().split())
         for f in llm_facts:
             k = f.get("key")
