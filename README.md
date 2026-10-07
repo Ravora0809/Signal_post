@@ -32,7 +32,7 @@ Signalpost researches Norwegian companies from a 9-digit organization number and
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/signalpost.git
+git clone https://github.com/Ravora0809/Signal_post.git
 cd signalpost
 
 ### 2. Configure environment
