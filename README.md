@@ -34,3 +34,13 @@ Signalpost researches Norwegian companies from a 9-digit organization number and
 ```bash
 git clone https://github.com/YOUR_USERNAME/signalpost.git
 cd signalpost
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+Add your OpenRouter API key to .env.
+
+### 3. Run
+```bash
+./run.sh
