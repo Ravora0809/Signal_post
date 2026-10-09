@@ -1,46 +1,30 @@
+
 import requests
 
-response = requests.post("http://127.0.0.1:8000/evaluate")
+response = requests.post(
+    "http://127.0.0.1:8000/evaluate",
+    params={"sample_size": 100},
+    timeout=270,
+)
 response.raise_for_status()
-
 data = response.json()
 
-# Find the list containing company evaluation records
-if isinstance(data, list):
-    results = data
-elif "results" in data:
-    results = data["results"]
-elif "companies" in data:
-    results = data["companies"]
-elif "evaluations" in data:
-    results = data["evaluations"]
-else:
-    # Find any list containing dictionaries with "overall"
-    results = next(
-        (
-            value for value in data.values()
-            if isinstance(value, list)
-            and value
-            and isinstance(value[0], dict)
-            and "overall" in value[0]
-        ),
-        None
+if "avg_overall_proxy" in data:
+    print(f"Companies evaluated: {data.get('sample_size', 'Unknown')}")
+    print(f"Overall Average: {data['avg_overall_proxy']:.2f}/100")
+    print(
+        "Coverage Average: "
+        f"{data['coverage_proxy_points_out_of_35']:.2f}/35"
     )
-
-if not results:
-    print("Could not find company scores.")
-    print("Response keys:", list(data.keys()))
-    raise SystemExit(1)
-
-overall_average = sum(
-    float(company["overall"])
-    for company in results
-) / len(results)
-
-coverage_average = sum(
-    float(company["useful_information_points"])
-    for company in results
-) / len(results)
-
-print(f"Overall Average: {overall_average:.2f}/100")
-print(f"Coverage Average: {coverage_average:.2f}/35")
+    print(f"Passes internal proxy: {data.get('passes_internal_proxy')}")
+    print(f"Required overall score: {data.get('target_overall')}/100")
+    print(
+        "Required coverage score: "
+        f"{data.get('coverage_qualifying_threshold')}/35"
+    )
+    print("\nScore breakdown:")
+    for category, points in data.get("points", {}).items():
+        print(f"  {category.replace('_', ' ').title()}: {points}")
+else:
+    print("Unexpected API response:")
+    print(data)

@@ -3,7 +3,7 @@ from signalpost.db import get_session_factory
 from signalpost.phases.p8_registry_import import import_registry_csv
 
 
-CSV_PATH = "data/brreg_companies_decompressed.csv"
+CSV_PATH = "data/brreg_1000.csv"
 ORGNR_PATH = "data/company_numbers_1000.txt"
 
 

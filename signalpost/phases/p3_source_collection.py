@@ -80,6 +80,18 @@ def verify_source_identity(
     if kind == "brreg":
         return True, "trusted_brreg"
 
+    if kind in {"financial_web", "search"} and any(host in (url or "").lower() for host in ("proff.no", "sokfirma.no", "financialfilings.com")):
+        if not body:
+            return False, "empty_body"
+        low = body.lower()
+        if company.orgnr not in body:
+            return False, "company_identity_not_proven"
+        tokens = _name_tokens(company.name)
+        matched = sum(1 for t in tokens if t in low)
+        if matched >= max(1, min(2, len(tokens))):
+            return True, "identity_verified_financial_source"
+        return False, "company_identity_not_proven"
+
     if kind == "regnskap":
         if not body:
             return False, "empty_body"

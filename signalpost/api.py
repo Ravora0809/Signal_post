@@ -5,6 +5,7 @@ from .pipeline import SignalPostPipeline
 from .models import Company, Fact, FactHistory, Source
 from .phases.p2_database import database_health
 from .phases.p9_evaluation import evaluate_sample
+from .phases.p5_fact_validation import accounting_consistency_check
 from .phases.p8_bulk_profiles import run_bulk
 
 app = FastAPI(title="Signalpost", version="1.0.0")
@@ -58,7 +59,7 @@ def company_profile(orgnr: str):
         fact_rows = []
         for f in facts:
             src = sources.get(f.source_id)
-            fact_rows.append({
+            fact_row = {
                 "key": f.key,
                 "value": f.value_text,
                 "confidence": f.confidence,
@@ -70,14 +71,22 @@ def company_profile(orgnr: str):
                     "identity_verified": bool(src.identity_verified) if src else False,
                 },
                 "evidence": f.evidence_snippet,
+                "as_of": f.as_of,
                 "explanation": (
                     "Selected because the fact is verified from an identity-verified source "
                     "for this organization; the evidence snippet is retained for auditability."
                 ),
                 "observed_at": f.observed_at,
-            })
+            }
+            if f.key == "employees" and src and src.kind == "brreg":
+                fact_row["scope"] = "registered_entity"
+                fact_row["scope_label"] = (
+                    "Employee count reported for this registered entity; it is not a group-wide workforce total."
+                )
+            fact_rows.append(fact_row)
         return {"orgnr": company.orgnr, "name": company.name, "website": company.website,
                 "facts": fact_rows,
+                "accounting_checks": accounting_consistency_check(facts),
                 "profile_explanation": (
                     "Signalpost links each published fact to a verified source, evidence snippet, "
                     "confidence score, and observation time. Conflicting values are not published."
@@ -109,8 +118,25 @@ def company_history(orgnr: str):
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
         rows = session.query(FactHistory).filter_by(company_id=company.id).order_by(FactHistory.detected_at.desc()).all()
-        return {"orgnr": orgnr, "changes": [{"key": r.key, "old": r.old_value, "new": r.new_value,
-                "type": r.change_type, "detected_at": r.detected_at} for r in rows]}
+        type_meanings = {
+            "added": "First value recorded by Signalpost; not proof of a real-world change.",
+            "baseline": "Existing value captured when history tracking was introduced.",
+            "changed": "Value changed between comparable observations from the same authoritative feed.",
+            "reconciled": "Value aligned to a different source or schema; not counted as a confirmed real-world change.",
+            "removed": "Explicit removal confirmed by an authoritative source.",
+        }
+        return {
+            "orgnr": orgnr,
+            "changes": [{
+                "key": r.key,
+                "old": r.old_value,
+                "new": r.new_value,
+                "type": r.change_type,
+                "meaning": type_meanings.get(r.change_type, "Recorded history event."),
+                "detected_at": r.detected_at,
+            } for r in rows],
+            "type_meanings": type_meanings,
+        }
     finally:
         session.close()
 

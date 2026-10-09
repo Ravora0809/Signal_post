@@ -14,12 +14,22 @@ class SearchAdapter:
 
     async def find_official_urls(self, company_name: str, orgnr: str) -> list[str]:
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
         except ImportError:
             log.warning("duckduckgo_missing")
             return []
 
         queries = [
+            # Financial sources first so a registry endpoint that cannot serve
+            # a special accounting plan (for example BANK) does not leave the
+            # company without financial facts.
+            f'site:sokfirma.no/selskap "{orgnr}" "{company_name}" regnskap',
+            f'site:proff.no/selskap "{orgnr}" "{company_name}" regnskap',
+            f'site:financialfilings.com/filings/dnb-bank-asa/annual-report "{orgnr}" "{company_name}" 2025',
+            f'site:financialfilings.com/filings "{orgnr}" "{company_name}" annual report 2025',
             f'"{company_name}" "{orgnr}" Norway',
             f'"{company_name}" "{orgnr}" annual report',
             f'"{company_name}" "{orgnr}" ansatte',

@@ -99,17 +99,21 @@ def score_company(session: Session, company: Company) -> CompanyScore:
     else:
         identity_evidence_points = 0.0
 
-    # Update score is intentionally conservative. Existing history is evidence
-    # that the change ledger has actually been exercised. A populated source/fact
-    # profile earns a 10-point readiness score, not a false claim of 20/20 update
-    # accuracy. Repeated runs with a consistent history can earn the full 20.
-    if history:
-        valid_history = 0
-        for h in history:
-            if h.change_type in {"added", "changed", "removed"} and (h.old_value != h.new_value or h.change_type == "removed"):
-                valid_history += 1
-        ratio = valid_history / len(history) if history else 0.0
-        update_points = 20.0 * ratio
+    # A baseline or initial addition is not evidence that change detection has
+    # been exercised. Award the extra 10 points only for valid changed/removed
+    # events with distinct old/new values. This prevents baseline backfills from
+    # artificially inflating the update score.
+    real_updates = [h for h in history if h.change_type in {"changed", "removed"}]
+    if real_updates:
+        valid_updates = [
+            h for h in real_updates
+            if h.change_type == "removed" and h.old_value is not None
+            or h.change_type == "changed"
+            and h.old_value is not None
+            and h.new_value is not None
+            and h.old_value != h.new_value
+        ]
+        update_points = 10.0 + 10.0 * (len(valid_updates) / len(real_updates))
     elif verified:
         update_points = 10.0
     else:

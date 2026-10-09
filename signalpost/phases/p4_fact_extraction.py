@@ -11,10 +11,11 @@ from ..models import Company, Source, Fact
 ALLOWED_KEYS = [
     "employees", "industry", "industry_code", "address", "city", "postal_code",
     "revenue_nok", "profit_nok", "capital_nok", "revenue", "profit",
-    "annual_result", "operating_result", "total_assets", "equity", "debt",
-    "accounting_currency", "accounting_year", "founded_year", "registration_date",
+    "annual_result", "operating_result", "total_assets", "equity", "total_liabilities",
+    "accounting_currency", "accounting_year", "accounting_statement_type", "founded_year", "registration_date",
     "phone", "email", "website", "legal_form", "chair", "ceo", "company_status",
-    "purpose", "activity", "sector",
+    "purpose", "activity", "sector", "latest_accounts_year",
+    "auxiliary_industry", "auxiliary_industry_code",
 ]
 
 PY_EMPLOYEES = re.compile(r"(\d{1,9})\s+(?:ansatte|employees|medarbeidere)", re.I)
@@ -131,10 +132,18 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
         as_of=employee_as_of,
     )
 
+    # naeringskode1 is the primary industry classification. Keep the
+    # auxiliary-unit code separate so a headquarters-services code is never
+    # mistaken for the company's main industry.
     industry = data.get("naeringskode1") or {}
     if isinstance(industry, dict):
-        add("industry_code", industry.get("kode"), json_key='"kode"')
-        add("industry", industry.get("beskrivelse"), json_key='"beskrivelse"')
+        add("industry_code", industry.get("kode"), json_key='"naeringskode1"')
+        add("industry", industry.get("beskrivelse"), json_key='"naeringskode1"')
+
+    auxiliary_industry = data.get("hjelpeenhetskode") or {}
+    if isinstance(auxiliary_industry, dict):
+        add("auxiliary_industry_code", auxiliary_industry.get("kode"), json_key='"hjelpeenhetskode"')
+        add("auxiliary_industry", auxiliary_industry.get("beskrivelse"), json_key='"hjelpeenhetskode"')
 
     form = data.get("organisasjonsform") or {}
     if isinstance(form, dict):
@@ -157,6 +166,9 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
         add("founded_year", int(founded[:4]), json_key='"stiftelsesdato"')
 
     add("registration_date", data.get("registreringsdatoEnhetsregisteret"), json_key='"registreringsdatoEnhetsregisteret"')
+    latest_accounts = str(data.get("sisteInnsendteAarsregnskap") or "")
+    if re.match(r"^\d{4}$", latest_accounts):
+        add("latest_accounts_year", int(latest_accounts), json_key='"sisteInnsendteAarsregnskap"')
     add("purpose", data.get("vedtektsfestetFormaal"), json_key='"vedtektsfestetFormaal"')
     add("activity", data.get("aktivitet"), json_key='"aktivitet"')
 
@@ -168,14 +180,58 @@ def structured_brreg_extract(body: str, source: Source) -> list[dict]:
     if isinstance(capital, dict):
         add("capital_nok", capital.get("belop"), json_key='"belop"')
 
-    if data.get("konkurs") is True:
-        add("company_status", "bankrupt", confidence=.99, json_key='"konkurs"')
-    if data.get("underAvvikling") is True:
-        add("company_status", "under_liquidation", confidence=.99, json_key='"underAvvikling"')
-    if data.get("underTvangsavviklingEllerTvangsopplosning") is True:
-        add("company_status", "under_forced_dissolution", confidence=.99, json_key='"underTvangsavviklingEllerTvangsopplosning"')
+    # Company status is deterministic and comes only from Brreg lifecycle flags.
+    # Never ask the LLM to infer status.
+    konkurs = data.get("konkurs") is True
+    under_avvikling = data.get("underAvvikling") is True
+    under_tvang = data.get("underTvangsavviklingEllerTvangsopplosning") is True
+    if konkurs:
+        status = "bankrupt"
+        status_key = '"konkurs"'
+    elif under_avvikling:
+        status = "under_liquidation"
+        status_key = '"underAvvikling"'
+    elif under_tvang:
+        status = "under_forced_dissolution"
+        status_key = '"underTvangsavviklingEllerTvangsopplosning"'
+    else:
+        status = "active"
+        status_key = '"konkurs"'
+    add("company_status", status, confidence=.999, json_key=status_key)
 
     return facts
+
+
+def _json_record_slice(body: str, target: dict) -> str | None:
+    """Return the exact source substring for one parsed JSON record.
+
+    Searching the whole endpoint response for a field name is unsafe because
+    Brreg returns multiple years and statement types in one payload. Evidence
+    must come from the exact selected record, not the first occurrence anywhere
+    in the response.
+    """
+    try:
+        decoder = json.JSONDecoder()
+        start = len(body) - len(body.lstrip())
+        if start >= len(body):
+            return None
+        if body[start] != "[":
+            parsed, end = decoder.raw_decode(body, start)
+            return body[start:end] if parsed == target else None
+
+        pos = start + 1
+        while pos < len(body):
+            while pos < len(body) and (body[pos].isspace() or body[pos] == ","):
+                pos += 1
+            if pos >= len(body) or body[pos] == "]":
+                break
+            record_start = pos
+            record, pos = decoder.raw_decode(body, pos)
+            if record == target:
+                return body[record_start:pos]
+        return None
+    except (ValueError, TypeError):
+        return None
 
 
 def structured_regnskap_extract(body: str, source: Source) -> list[dict]:
@@ -220,7 +276,15 @@ def structured_regnskap_extract(body: str, source: Source) -> list[dict]:
     )
     row = pool[0]
 
+    # Critical evidence invariant: all fields and evidence are scoped to this
+    # one selected accounting record. If we cannot locate its exact raw JSON
+    # slice in the source response, publish no financial facts from this source.
+    row_body = _json_record_slice(body, row)
+    if not row_body:
+        return []
+
     currency = str(row.get("valuta") or "").upper().strip()
+    statement_type = str(row.get("regnskapstype") or "").upper().strip()
     period = row.get("regnskapsperiode") or {}
     end_date = str(period.get("tilDato") or "")
     year = int(end_date[:4]) if re.match(r"^\d{4}", end_date) else None
@@ -245,34 +309,50 @@ def structured_regnskap_extract(body: str, source: Source) -> list[dict]:
             return None
 
     def snippet_for(term: str) -> str:
-        idx = body.find(term)
+        # Search only the selected record, never the entire multi-record body.
+        idx = row_body.find(term)
         if idx < 0:
-            idx = body.lower().find(term.lower())
+            idx = row_body.lower().find(term.lower())
         if idx < 0:
-            return term[:500]
+            return ""
         start = max(0, idx - 220)
-        end = min(len(body), idx + len(term) + 220)
-        return body[start:end][:500]
+        end = min(len(row_body), idx + len(term) + 220)
+        return row_body[start:end][:500]
 
     facts: list[dict] = []
 
+    if statement_type:
+        evidence = snippet_for('"regnskapstype"')
+        if evidence:
+            facts.append({
+                "key": "accounting_statement_type",
+                "value": statement_type,
+                "confidence": 0.995,
+                "evidence": evidence,
+                "as_of": end_date,
+            })
+
     if currency:
-        facts.append({
-            "key": "accounting_currency",
-            "value": currency,
-            "confidence": 0.995,
-            "evidence": snippet_for('"valuta"'),
-            "as_of": end_date,
-        })
+        evidence = snippet_for('"valuta"')
+        if evidence:
+            facts.append({
+                "key": "accounting_currency",
+                "value": currency,
+                "confidence": 0.995,
+                "evidence": evidence,
+                "as_of": end_date,
+            })
 
     if year is not None:
-        facts.append({
-            "key": "accounting_year",
-            "value": year,
-            "confidence": 0.995,
-            "evidence": snippet_for('"tilDato"'),
-            "as_of": end_date,
-        })
+        evidence = snippet_for('"tilDato"')
+        if evidence:
+            facts.append({
+                "key": "accounting_year",
+                "value": year,
+                "confidence": 0.995,
+                "evidence": evidence,
+                "as_of": end_date,
+            })
 
     values = [
         ("revenue", income.get("sumDriftsinntekter"), '"sumDriftsinntekter"'),
@@ -296,15 +376,140 @@ def structured_regnskap_extract(body: str, source: Source) -> list[dict]:
             else key
         )
 
+        evidence = snippet_for(evidence_key)
+        if not evidence or str(raw_value) not in evidence:
+            # Fail closed if the exact selected-record value is not visible in
+            # the evidence snippet. Never publish a value without proof.
+            continue
         facts.append({
             "key": out_key,
             "value": clean_value,
             "confidence": 0.995,
-            "evidence": snippet_for(evidence_key),
+            "evidence": evidence,
             "currency": currency or None,
             "as_of": end_date,
         })
 
+    return facts
+
+
+def structured_financial_web_extract(body: str, source: Source) -> list[dict]:
+    """Extract financial facts from a single, identity-verified public filing.
+
+    Sources are deliberately split into two cases:
+    - Proff/Sokfirma: tabular company figures, usually explicitly labelled as
+      parent/company accounts.
+    - FinancialFilings: searchable mirror of the annual report.  For a group
+      report we MUST isolate the ``Annual accounts DNB Bank ASA`` section before
+      reading numbers, otherwise group figures could be published for the
+      company.  If that section is not present, return no company-level facts.
+
+    The accounting year is the reporting year, while ``as_of`` is the financial
+    statement end date.  Publication/fetch date is kept on Source.fetched_at and
+    is not confused with the accounting period.
+    """
+    url = (source.url or '').lower()
+    if not any(host in url for host in ("proff.no", "sokfirma.no", "financialfilings.com")):
+        return []
+
+    text = body or ""
+    scope = text
+    scope_label = "company_financial_table"
+
+    if "financialfilings.com" in url:
+        marker = re.search(r"Annual accounts DNB Bank ASA", text, re.I)
+        if not marker:
+            # Generic company filing pages can still contain an explicit
+            # company annual-accounts heading.
+            marker = re.search(r"Annual accounts\s+[A-Z][A-Za-z0-9 .,&-]{2,120}", text, re.I)
+        if not marker:
+            return []
+        scope = text[marker.start():]
+        # Stop before the next major report section. This prevents the parser
+        # from falling back into the Group accounts later in the document.
+        nxt = re.search(r"\n\s*#\s+(?:Statement|Independent auditor|Appendix|Notes to the accounts)\b", scope, re.I)
+        if nxt and nxt.start() > 100:
+            scope = scope[:nxt.start()]
+        scope_label = "annual_report_company_accounts"
+
+    # Prefer the accounting table header over publication/crawl dates.
+    # Annual reports are often published in the following calendar year (e.g.
+    # 2025 accounts published in March 2026), so using max(year) is unsafe.
+    header = re.search(
+        r"(?:regnskap[^\n]{0,80}?|amounts\s+in\s+NOK[^\n]{0,80}?|\b20\d{2}-12-31[^\n]{0,20}?)"
+        r"(20\d{2})",
+        scope, re.I,
+    )
+    if header:
+        year = int(header.group(1))
+    else:
+        year_candidates = [int(y) for y in re.findall(r"\b(20\d{2})\b", scope[:5000])]
+        if not year_candidates:
+            return []
+        year = max(y for y in year_candidates if y <= datetime.now(timezone.utc).year)
+    end_date = f"{year}-12-31"
+
+    currency = "NOK" if re.search(r"\bNOK\b", scope, re.I) else None
+    thousands = bool(re.search(r"bel[øo]p\s+i\s+(?:NOK\s+)?1000|amounts\s+in\s+NOK\s+thousand", scope, re.I))
+    millions = bool(re.search(r"amounts\s+in\s+NOK\s+million", scope, re.I))
+
+    def parse_num(raw: str, unit: str = "") -> float | None:
+        x = raw.strip().replace(" ", "")
+        # Parentheses are presentation negatives in annual reports.
+        negative = x.startswith("(") and x.endswith(")")
+        x = x.strip("()")
+        if "," in x and "." in x:
+            x = x.replace(".", "").replace(",", ".")
+        elif "," in x:
+            x = x.replace(",", ".")
+        try:
+            n = float(x)
+        except ValueError:
+            return None
+        u = unit.lower()
+        if "mrd" in u or "billion" in u or "milliard" in u:
+            n *= 1_000_000_000
+        elif "million" in u:
+            n *= 1_000_000
+        elif thousands:
+            n *= 1_000
+        elif millions:
+            n *= 1_000_000
+        if negative:
+            n = -n
+        return n
+
+    # In report tables the first numeric value after a row label is the latest
+    # accounting year. We intentionally do NOT use generic "resultat" because
+    # that can match a different row such as Resultat før skatt.
+    patterns = [
+        ("revenue_nok", r"(?:sum\s+driftsinntekter|total\s+income)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+        ("operating_result", r"(?:driftsresultat\s*\(?(?:EBIT)?\)?|pre-tax\s+operating\s+profit)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+        ("annual_result", r"(?:årsresultat|aarsresultat|profit\s+for\s+the\s+year)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+        ("total_assets", r"(?:sum\s+eiendeler|total\s+assets)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+        ("equity", r"(?:sum\s+egenkapital|total\s+equity)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+        ("total_liabilities", r"(?:sum\s+gjeld|total\s+liabilities)\s*[:|]?\s*\(?([0-9][0-9\s.,]*)\)?\s*(mrd(?:\.?\s*kr)?|billion(?:\s*kr)?|milliard(?:er)?(?:\s*kr)?|million(?:er)?(?:\s*kr)?|kr)?"),
+    ]
+
+    facts = [{
+        "key": "accounting_year", "value": year, "confidence": 0.995,
+        "evidence": f"{scope_label}: accounting year {year}", "as_of": end_date,
+    }]
+    if currency:
+        facts.append({"key": "accounting_currency", "value": currency, "confidence": 0.995, "evidence": "NOK", "as_of": end_date})
+
+    for out_key, pattern in patterns:
+        m = re.search(pattern, scope, re.I)
+        if not m:
+            continue
+        value = parse_num(m.group(1), m.group(2) or "")
+        if value is None:
+            continue
+        evidence = scope[max(0, m.start()-140):min(len(scope), m.end()+140)].strip()[:700]
+        facts.append({
+            "key": out_key, "value": int(value) if value.is_integer() else value,
+            "confidence": 0.995, "evidence": evidence, "currency": currency, "as_of": end_date,
+        })
     return facts
 
 
@@ -329,6 +534,8 @@ async def extract_from_source(llm: LLMAdapter, source: Source) -> tuple[list[dic
     else:
         for f in deterministic_extract(source.body):
             by_key.setdefault(f["key"], f)
+        for f in structured_financial_web_extract(source.body, source):
+            by_key[f["key"]] = f
 
     # Only enrich non-registry sources and the role endpoint through the LLM.
     # Never let an LLM overwrite a higher-confidence structured Brreg fact.
@@ -363,6 +570,30 @@ async def extract_from_source(llm: LLMAdapter, source: Source) -> tuple[list[dic
             if existing is None or candidate["confidence"] > float(existing.get("confidence", 0)):
                 by_key[k] = candidate
 
+    # A few providers return a zero confidence even when the extracted value
+    # is directly supported by an exact quote from an identity-verified source.
+    # Repair only the known deterministic cases; do not inflate arbitrary LLM
+    # outputs or treat confidence as a calibrated probability.
+    source_path = urlparse(source.url).path.rstrip("/")
+    source_host = (urlparse(source.url).hostname or "").lower()
+    for fact in by_key.values():
+        try:
+            confidence = float(fact.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence = str(fact.get("evidence") or "")
+        value = str(fact.get("value") or "")
+        exact_evidence = bool(evidence and source.body and evidence in source.body)
+        if confidence > 0 or not source.identity_verified or not exact_evidence:
+            continue
+        key = fact.get("key")
+        if source.kind == "brreg" and source_path.endswith("/roller") and key in {"ceo", "chair"}:
+            fact["confidence"] = 0.90
+        elif source.kind == "website" and key == "website":
+            value_host = (urlparse(value if value.startswith(("http://", "https://")) else "https://" + value).hostname or "").lower()
+            if source_host and value_host and (source_host == value_host or source_host.endswith("." + value_host) or value_host.endswith("." + source_host)):
+                fact["confidence"] = 0.90
+
     return list(by_key.values()), cost
 
 
@@ -387,7 +618,7 @@ def persist_facts(session: Session, company: Company, source: Source, facts: lis
         elif val is not None:
             fact.value_text = str(val).strip()
 
-        if key in {"revenue_nok", "profit_nok", "capital_nok", "revenue", "profit", "annual_result", "operating_result", "total_assets", "equity", "debt"}:
+        if key in {"revenue_nok", "profit_nok", "capital_nok", "revenue", "profit", "annual_result", "operating_result", "total_assets", "equity", "total_liabilities"}:
             fact.currency = f.get("currency") or ("NOK" if key.endswith("_nok") or key == "capital_nok" else None)
 
         as_of = f.get("as_of")

@@ -5,7 +5,7 @@ from .adapters.http import SafeHTTPClient
 from .adapters.llm import LLMAdapter
 from .adapters.search import SearchAdapter
 from .config import get_settings
-from .models import RunLog, Fact
+from .models import RunLog, Fact, Source
 from .utils.rate_limit import Budget
 from .phases import p1_company_lookup, p3_source_collection, p4_fact_extraction, p5_fact_validation, p6_change_detection
 
@@ -54,10 +54,18 @@ class SignalPostPipeline:
             stage = "p6_changes"
             changes = p6_change_detection.detect_changes(session, company.id, previous, all_new_facts)
             session.flush()
+            verified_facts = session.query(Fact).filter(
+                Fact.company_id == company.id, Fact.verified.is_(True)
+            ).order_by(Fact.observed_at.desc(), Fact.id.desc()).all()
             latest = {}
-            for f in session.query(Fact).filter(Fact.company_id == company.id, Fact.verified.is_(True)).order_by(Fact.observed_at.desc(), Fact.id.desc()).all():
+            for f in verified_facts:
                 latest.setdefault(f.key, f.value_text)
-            result.update({"status": "ok", "company_id": company.id, "company_name": company.name, "sources": len(sources), "facts_observed": len(all_new_facts), "verified_facts": sum(f.verified for f in all_new_facts), "changes": len(changes), "profile": latest, "budget": self.budget.snapshot()})
+            employee_fact = next((f for f in verified_facts if f.key == "employees"), None)
+            if employee_fact and employee_fact.source_id:
+                employee_source = session.query(Source).filter_by(id=employee_fact.source_id).one_or_none()
+                if employee_source and employee_source.kind == "brreg":
+                    latest["employees_scope"] = "Registered entity count; not a group-wide workforce total."
+            result.update({"status": "ok", "company_id": company.id, "company_name": company.name, "sources": len(sources), "facts_observed": len(all_new_facts), "verified_facts": sum(f.verified for f in all_new_facts), "changes": len(changes), "profile": latest, "accounting_checks": p5_fact_validation.accounting_consistency_check(verified_facts), "budget": self.budget.snapshot()})
             return self._log_run(session, stage, company.id, "ok", f"facts={len(all_new_facts)} changes={len(changes)}", t0, result)
         except Exception as e:
             log.exception("pipeline_error", orgnr=orgnr, stage=stage)
